@@ -1,0 +1,134 @@
+---
+- name: Deploy and Install Odoo Custom Modules
+  hosts: all
+  become: yes
+  vars:
+    odoo_user: odoo
+    odoo_service: odoo17
+    odoo_path: /odoo17
+    addons_dir: /odoo17/custom_addons
+    odoo_conf: /odoo17/odoo.conf
+
+    modules_to_install:
+      - sale_management
+      - mail
+      - contacts
+      - website
+      - purchase
+      - stock
+      - mrp
+      - approvals
+      - point_of_sale
+      - account_accountant
+      - bi_pos_upi_payment
+      - checklist_cmr
+      - Custom-Header
+      - hsn_code_automation_management
+      - nhcl_bi_pos_reports
+      - nhcl_customizations
+      - nhcl_mall_walkins
+      - nhcl_pos_bi_multi_barcode_for_product
+      - nhcl_pos_custom_tax
+      - nhcl_pos_sale
+      - nhcl_pos_set_default_customer
+      - nhcl_store_to_ho_transactions
+      - odoo_rest_nhcl
+      - pos_terminal_access
+      - pos_user_disable_buttons
+      - report_pdf_options
+      - stock_inventory_count_tus
+      - ultimate_pos_shortcuts
+      - user_implementation
+      - web_listview_column_width_cr
+      - wt_pos_fix_discount
+      - xendit_pos
+
+  tasks:
+
+    - name: Ensure custom_addons directory exists
+      file:
+        path: "{{ addons_dir }}"
+        state: directory
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+        mode: "0755"
+
+    - name: Mark custom_addons as safe git directory
+      command: git config --global --add safe.directory {{ addons_dir }}
+      changed_when: false
+
+    - name: Ensure odoo .ssh directory exists
+      file:
+        path: /home/odoo/.ssh
+        state: directory
+        owner: odoo
+        group: odoo
+        mode: '0700'
+
+    - name: Add GitHub to known_hosts
+      shell: ssh-keyscan github.com >> /home/odoo/.ssh/known_hosts
+      args:
+        creates: /home/odoo/.ssh/known_hosts
+
+    - name: Pull latest custom addons from Git
+      git:
+        repo: git@github.com:karthikraj98/store-addons.git
+        dest: "{{ addons_dir }}"
+        version: main
+        update: yes
+        force: yes
+        accept_hostkey: yes
+      environment:
+        GIT_SSH_COMMAND: "ssh -i /home/odoo/.ssh/id_rsa -o StrictHostKeyChecking=no"
+
+    - name: Fix ownership of custom_addons
+      file:
+        path: "{{ addons_dir }}"
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+        recurse: yes
+
+    - name: Ensure custom_addons is in addons_path
+      lineinfile:
+        path: "{{ odoo_conf }}"
+        regexp: '^addons_path\s*='
+        line: "addons_path = {{ odoo_path }}/addons,{{ addons_dir }}/CMR-STORE-190"
+        backup: yes
+
+    - name: Restart Odoo before module installation
+      systemd:
+        name: "{{ odoo_service }}"
+        state: restarted
+
+    - name: Install additional Python libraries for custom modules
+      pip:
+        name:
+          - odfpy
+          - wheel
+          - pandas
+          - openpyxl
+          - phonenumbers
+          - pyjwt
+        virtualenv: "{{ odoo_path }}/venv"
+
+    - name: Start Odoo before module installation
+      systemd:
+        name: "{{ odoo_service }}"
+        state: restarted
+
+    - name: Install Odoo modules
+      shell: |
+        sudo -u {{ odoo_user }} {{ odoo_path }}/venv/bin/python {{ odoo_path }}/odoo-bin \
+        -c {{ odoo_conf }} \
+        -d {{ db_name }} \
+        -i {{ item }} \
+        --xmlrpc-port=7777 \
+        --stop-after-init
+      args:
+        chdir: "{{ odoo_path }}"
+      loop: "{{ modules_to_install }}"
+
+    - name: Final restart of Odoo service
+      systemd:
+        name: "{{ odoo_service }}"
+        state: restarted
