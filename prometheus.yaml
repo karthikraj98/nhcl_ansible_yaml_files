@@ -1,0 +1,183 @@
+---
+- name: Install Monitoring Stack
+  hosts: all
+  become: yes
+
+  vars:
+    prometheus_version: "2.51.2"
+    node_exporter_version: "1.8.1"
+
+  tasks:
+
+  - name: Install required packages
+    apt:
+      name:
+        - wget
+        - tar
+        - pgbouncer
+      state: present
+      update_cache: yes
+
+  - name: Ensure postgres user exists
+    user:
+      name: postgres
+      system: yes
+      shell: /usr/sbin/nologin
+
+#################################################
+# PROMETHEUS
+#################################################
+
+  - name: Install Prometheus
+    block:
+
+      - get_url:
+          url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+          dest: /tmp/prometheus.tar.gz
+
+      - unarchive:
+          src: /tmp/prometheus.tar.gz
+          dest: /opt/
+          remote_src: yes
+
+      - copy:
+          remote_src: yes
+          src: "/opt/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+          dest: "/usr/local/bin/{{ item }}"
+          mode: "0755"
+        loop:
+          - prometheus
+          - promtool
+
+      - copy:
+          dest: /etc/prometheus.yml
+          content: |
+            global:
+              scrape_interval: 15s
+            scrape_configs:
+              - job_name: node_exporter
+                static_configs:
+                  - targets: ['localhost:9100']
+
+      - copy:
+          dest: /etc/systemd/system/prometheus.service
+          content: |
+            [Unit]
+            Description=Prometheus
+            After=network.target
+
+            [Service]
+            ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus.yml
+
+            [Install]
+            WantedBy=multi-user.target
+
+#################################################
+# NODE EXPORTER
+#################################################
+
+  - name: Install Node Exporter
+    block:
+
+      - get_url:
+          url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+          dest: /tmp/node_exporter.tar.gz
+
+      - unarchive:
+          src: /tmp/node_exporter.tar.gz
+          dest: /opt/
+          remote_src: yes
+
+      - copy:
+          remote_src: yes
+          src: "/opt/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+          dest: /usr/local/bin/node_exporter
+          mode: "0755"
+
+      - copy:
+          dest: /etc/systemd/system/node_exporter.service
+          content: |
+            [Unit]
+            Description=Node Exporter
+
+            [Service]
+            ExecStart=/usr/local/bin/node_exporter
+
+            [Install]
+            WantedBy=multi-user.target
+
+#################################################
+# PGBOUNCER
+#################################################
+
+  - name: Configure PgBouncer
+    block:
+
+      - copy:
+          dest: /etc/pgbouncer/pgbouncer.ini
+          content: |
+            [databases]
+            postgres = host=127.0.0.1 port=5432 dbname=postgres user={{ db_user }} password={{ db_password }}
+            {{ db_name }} = host=127.0.0.1 port=5432 dbname={{ db_name }}
+
+
+            [pgbouncer]
+
+            listen_addr = 127.0.0.1
+            listen_port = 6432
+            auth_type = md5
+            auth_file = /etc/pgbouncer/userlist.txt
+            pool_mode = transaction
+            max_client_conn = 200
+            default_pool_size = 20
+            reserve_pool_size = 5
+            reserve_pool_timeout = 5
+            server_lifetime = 3600
+            server_idle_timeout = 60
+            query_timeout = 120
+            idle_transaction_timeout = 60
+            log_connections = 1
+            log_disconnections = 1
+            log_pooler_errors = 1
+            stats_period = 60
+
+      - copy:
+          dest: /etc/pgbouncer/userlist.txt
+          content: |
+            "{{ db_user }}" "{{ db_password }}"
+
+#################################################
+# GRAFANA
+#################################################
+
+  - name: Install Grafana
+    block:
+
+      - apt_key:
+          url: https://packages.grafana.com/gpg.key
+
+      - apt_repository:
+          repo: "deb https://packages.grafana.com/oss/deb stable main"
+
+      - apt:
+          name: grafana
+          state: present
+          update_cache: yes
+
+#################################################
+# START SERVICES
+#################################################
+
+  - name: Reload systemd
+    command: systemctl daemon-reload
+
+  - name: Start services
+    systemd:
+      name: "{{ item }}"
+      enabled: yes
+      state: started
+    loop:
+      - prometheus
+      - node_exporter
+      - pgbouncer
+      - grafana-server

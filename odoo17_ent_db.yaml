@@ -1,0 +1,288 @@
+---
+- name: Install Odoo 17 on multiple servers
+  hosts: all
+  become: yes
+
+  vars:
+    odoo_user: odoo
+    odoo_service: odoo17
+    odoo_version: 17.0
+    odoo_root: /odoo17
+    odoo_install_dir: /odoo17
+    enterprise_addons: /odoo17/enterprise
+    addons_path: /odoo17/addons
+    odoo_venv_dir: /odoo17/venv
+    odoo_config: /odoo17/odoo.conf
+    odoo_log_file: /odoo17/odoo.log
+    odoo_port: 7171
+    admin_password: admin@123
+
+  tasks:
+
+    - name: Install required packages
+      apt:
+        update_cache: yes
+        name:
+          - git
+          - ca-certificates
+          - python3.11
+          - python3.11-venv
+          - python3.11-dev
+          - python3-pip
+          - build-essential
+          - wget
+          - libpq-dev
+          - node-less
+          - libjpeg-dev
+          - libxml2-dev
+          - libxslt1-dev
+          - zlib1g-dev
+          - libsasl2-dev
+          - libldap2-dev
+          - libffi-dev
+          - libssl-dev
+          - wkhtmltopdf
+          - postgresql
+        state: present
+
+    - name: Ensure PostgreSQL service is started
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Create Odoo user
+      user:
+        name: "{{ odoo_user }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+
+    - name: Create Odoo root directory
+      file:
+        path: "{{ odoo_root }}"
+        state: directory
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+        mode: "0755"
+
+    - name: Ensure enterprise addons directory exists
+      file:
+        path: "{{ enterprise_addons }}"
+        state: directory
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+        mode: "0755"
+      become: yes
+
+    - name: Create Odoo data directory
+      file:
+        path: /home/odoo
+        state: directory
+        owner: odoo
+        group: odoo
+        mode: "0755"
+
+    - name: Ensure Odoo install directory is clean
+      file:
+        path: "{{ odoo_install_dir }}"
+        state: absent
+
+    - name: Clone Odoo Community
+      git:
+        repo: https://github.com/odoo/odoo.git
+        dest: "{{ odoo_install_dir }}"
+        version: "{{ odoo_version }}"
+        depth: 1
+        update: yes
+        #force: yes
+      become: yes
+
+    - name: Add GitHub to known hosts
+      shell: ssh-keyscan github.com >> /home/ubuntu/.ssh/known_hosts
+
+    - name: Allow ubuntu to write enterprise directory
+      file:
+        path: "{{ enterprise_addons }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Clone Odoo Enterprise addons
+      git:
+        repo: git@github.com:karthikraj98/odoo17_enterprise_addons.git
+        dest: "{{ enterprise_addons }}"
+        version: main
+        depth: 1
+        update: yes
+      become: yes
+      become_user: ubuntu
+
+    - name: Set ownership of Odoo directories
+      file:
+        path: "{{ item }}"
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+        recurse: yes
+      loop:
+        - "{{ odoo_install_dir }}"
+        - "{{ enterprise_addons }}"
+
+    - name: Create addons directory
+      file:
+        path: "{{ addons_path }}"
+        state: directory
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+
+    - name: Create Python virtual environment
+      command: python3.11 -m venv "{{ odoo_venv_dir }}"
+      args:
+        creates: "{{ odoo_venv_dir }}"
+
+    - name: Install python requirements
+      pip:
+        requirements: "{{ odoo_install_dir }}/requirements.txt"
+        virtualenv: "{{ odoo_venv_dir }}"
+
+    - name: Create Odoo configuration
+      copy:
+        dest: "{{ odoo_config }}"
+        content: |
+          [options]
+          admin_passwd = {{ admin_password }}
+          addons_path = {{ addons_path }},{{ enterprise_addons }}/enterprise_addons_17
+          data_dir = /home/odoo
+          db_host = False
+          db_port = False
+          db_user = {{ db_user }}
+          db_password = {{ db_password }}
+          logfile = {{ odoo_log_file }}
+          xmlrpc_port = {{ odoo_port }}
+          workers = 12
+          max_cron_threads = 1
+          limit_memory_soft = 1073741824
+          limit_memory_hard = 1573741824
+          limit_time_cpu = 3600
+          limit_time_real = 3600
+        owner: "{{ odoo_user }}"
+        group: "{{ odoo_user }}"
+        mode: "0644"
+
+    #- name: Create PostgreSQL user
+     # community.postgresql.postgresql_user:
+      #   name: "{{ db_user }}"
+       #  password: "{{ db_password }}"
+        # role_attr_flags: SUPERUSER,CREATEDB,CREATEROLE,REPLICATION,BYPASSRLS
+
+    - name: Create PostgreSQL user
+      shell: |
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='{{ db_user }}'" | grep -q 1 || sudo -u postgres createuser {{ db_user }}
+
+    - name: Grant PostgreSQL privileges
+      shell: |
+        sudo -u postgres psql -c "ALTER USER {{ db_user }} WITH SUPERUSER;"
+        sudo -u postgres psql -c "ALTER USER {{ db_user }} WITH CREATEDB;"
+        sudo -u postgres psql -c "ALTER USER {{ db_user }} WITH CREATEROLE;"
+        sudo -u postgres psql -c "ALTER USER {{ db_user }} WITH REPLICATION;"
+        sudo -u postgres psql -c "ALTER USER {{ db_user }} WITH BYPASSRLS;"
+
+    - name: Create PostgreSQL database
+      shell: |
+        sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw {{ db_name }} || sudo -u postgres createdb -O {{ db_user }} {{ db_name }}
+
+    #- name: Configure PostgreSQL performance settings
+    #  blockinfile:
+    #    path: /etc/postgresql/14/main/postgresql.conf
+    #    marker: "# {mark} ANSIBLE ODOO SETTINGS"
+    #    block: |
+
+          # CONNECTIONS
+        #  max_connections = 60
+        #  superuser_reserved_connections = 5
+
+          # MEMORY
+        #  shared_buffers = 4GB
+        #  effective_cache_size = 12GB
+        #  work_mem = 16MB
+        #  maintenance_work_mem = 1GB
+        #  wal_buffers = 16MB
+
+          # WAL & CHECKPOINT
+        #  synchronous_commit = on
+        #  full_page_writes = on
+        #  checkpoint_timeout = 15min
+        #  checkpoint_completion_target = 0.9
+        #  max_wal_size = 8GB
+        #  min_wal_size = 2GB
+
+          # IO
+        #  effective_io_concurrency = 200
+        #  random_page_cost = 1.1
+
+          # AUTOVACUUM
+        #  autovacuum = on
+        #  autovacuum_max_workers = 4
+        #  autovacuum_naptime = 30s
+        #  autovacuum_vacuum_scale_factor = 0.05
+        #  autovacuum_analyze_scale_factor = 0.02
+        #  autovacuum_vacuum_cost_limit = 2000
+        #  log_autovacuum_min_duration = 250ms
+
+          # TIMEOUTS
+        #  idle_in_transaction_session_timeout = 10min
+
+          # PERFORMANCE
+        #  jit = off
+
+    - name: Change PostgreSQL authentication to md5
+      lineinfile:
+        path: /etc/postgresql/14/main/pg_hba.conf
+        regexp: '^local\s+all\s+all\s+peer'
+        line: 'local   all             all                                     md5'
+
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted
+
+    - name: Set PostgreSQL password
+      shell: |
+        sudo -u postgres psql -c "ALTER USER {{ db_user }} WITH PASSWORD '{{ db_password }}';"
+
+    - name: Initialize Odoo database
+      shell: |
+        sudo -u {{ odoo_user }} {{ odoo_venv_dir }}/bin/python {{ odoo_install_dir }}/odoo-bin \
+        -c {{ odoo_config }} \
+        -d {{ db_name }} \
+        -i base \
+        --stop-after-init
+
+    - name: Create systemd service
+      copy:
+        dest: /etc/systemd/system/{{ odoo_service }}.service
+        content: |
+          [Unit]
+          Description=Odoo 17
+          Requires=postgresql.service
+          After=network.target postgresql.service
+
+          [Service]
+          Type=simple
+          User={{ odoo_user }}
+          Group={{ odoo_user }}
+          ExecStart={{ odoo_venv_dir }}/bin/python {{ odoo_install_dir }}/odoo-bin -c {{ odoo_config }}
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      command: systemctl daemon-reload
+
+    - name: Start Odoo
+      systemd:
+        name: "{{ odoo_service }}"
+        enabled: yes
+        state: restarted
